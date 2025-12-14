@@ -150,8 +150,12 @@ def process_directory(directory, collection, is_npa=True):
                 meta["type"] = "NPA" if is_npa else "Instruction"
                 metadatas.append(meta)
             
-            # Batch add to avoid limits if any
-            batch_size = 100
+            # Batch add with larger batches for better performance
+            # OpenAI API can handle larger batches efficiently
+            batch_size = 500
+            total_chunks = len(documents)
+            print(f"Processing {file} ({total_chunks} chunks)...", end=" ", flush=True)
+            
             for i in range(0, len(documents), batch_size):
                 end = min(i + batch_size, len(documents))
                 collection.add(
@@ -159,7 +163,11 @@ def process_directory(directory, collection, is_npa=True):
                     documents=documents[i:end],
                     metadatas=metadatas[i:end]
                 )
-            print(f"Processed {file} ({len(chunks)} chunks)")
+                # Show progress
+                progress = min(end, total_chunks)
+                print(f"{progress}/{total_chunks}", end=" ", flush=True)
+            
+            print("✓ Done")
 
 if __name__ == "__main__":
     ingest_data()

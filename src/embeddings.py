@@ -1,28 +1,31 @@
-from sentence_transformers import SentenceTransformer
-from src.config import EMBEDDING_MODEL_NAME
-from src.utils import get_compute_device
-import torch
+from openai import OpenAI
+from src.config import EMBEDDING_MODEL_NAME, OPENAI_API_KEY
 
 class EmbeddingFunction:
     def __init__(self):
-        device = get_compute_device()
-        print(f"Embedding model initialized on: {device.upper()}")
+        print(f"Initializing OpenAI Embedding Model: {EMBEDDING_MODEL_NAME}")
+        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.model_name = EMBEDDING_MODEL_NAME
         
-        try:
-            self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
-        except Exception as e:
-            if device == "cuda":
-                print(f"Failed to load model on CUDA: {e}")
-                print("Retrying with CPU...")
-                device = "cpu"
-                self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
-            else:
-                raise e
-
     def __call__(self, input):
         if isinstance(input, str):
             input = [input]
-        return self.model.encode(input).tolist()
+        
+        # OpenAI API supports batch processing up to 2048 texts
+        # We'll process in batches to avoid rate limits
+        batch_size = 100
+        all_embeddings = []
+        
+        for i in range(0, len(input), batch_size):
+            batch = input[i:i + batch_size]
+            response = self.client.embeddings.create(
+                input=batch,
+                model=self.model_name
+            )
+            batch_embeddings = [item.embedding for item in response.data]
+            all_embeddings.extend(batch_embeddings)
+        
+        return all_embeddings
 
     def embed_query(self, input):
         return self.__call__(input)
@@ -32,7 +35,7 @@ class EmbeddingFunction:
     
     def name(self):
         """Return the name of the embedding model for ChromaDB"""
-        return EMBEDDING_MODEL_NAME
+        return self.model_name
 
 # Singleton instance
 _embedding_function = None
