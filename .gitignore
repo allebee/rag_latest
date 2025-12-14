@@ -1,0 +1,18 @@
+# System
+.DS_Store
+__pycache__/
+*.pyc
+
+# Environment
+venv/
+.env
+
+# Database (Local Vector Store)
+chroma_db/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
