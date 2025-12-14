@@ -1,12 +1,27 @@
 import torch
+import os
 
 def get_compute_device():
     """
     Returns the best available compute device.
     Priority: CUDA (NVIDIA) > MPS (Apple Silicon) > CPU
     """
+    # Check if CPU mode is forced via environment variable
+    if os.environ.get('FORCE_CPU', '0') == '1':
+        print("FORCE_CPU enabled, using CPU")
+        return "cpu"
+    
     if torch.cuda.is_available():
-        return "cuda"
+        try:
+            # Try to perform a simple operation to verify CUDA actually works
+            test_tensor = torch.zeros(1, device="cuda")
+            del test_tensor
+            torch.cuda.empty_cache()
+            return "cuda"
+        except Exception as e:
+            print(f"CUDA is available but not working properly: {e}")
+            print("Falling back to CPU")
+            return "cpu"
     elif torch.backends.mps.is_available():
         return "mps"
     else:

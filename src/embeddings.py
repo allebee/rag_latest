@@ -7,7 +7,17 @@ class EmbeddingFunction:
     def __init__(self):
         device = get_compute_device()
         print(f"Embedding model initialized on: {device.upper()}")
-        self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
+        
+        try:
+            self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
+        except Exception as e:
+            if device == "cuda":
+                print(f"Failed to load model on CUDA: {e}")
+                print("Retrying with CPU...")
+                device = "cpu"
+                self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=device)
+            else:
+                raise e
 
     def __call__(self, input):
         if isinstance(input, str):
@@ -19,6 +29,10 @@ class EmbeddingFunction:
         
     def embed_documents(self, input):
         return self.__call__(input)
+    
+    def name(self):
+        """Return the name of the embedding model for ChromaDB"""
+        return EMBEDDING_MODEL_NAME
 
 # Singleton instance
 _embedding_function = None

@@ -39,9 +39,19 @@ class Agent:
         print("Loading Re-ranker model...")
         device = get_compute_device()
         print(f"Re-ranker initialized on: {device.upper()}")
-            
-        self.reranker = CrossEncoder('BAAI/bge-reranker-v2-m3', device=device)
-        print("Re-ranker loaded.")
+        
+        try:
+            self.reranker = CrossEncoder('BAAI/bge-reranker-v2-m3', device=device)
+            print("Re-ranker loaded.")
+        except Exception as e:
+            if device == "cuda":
+                print(f"Failed to load Re-ranker on CUDA: {e}")
+                print("Retrying with CPU...")
+                device = "cpu"
+                self.reranker = CrossEncoder('BAAI/bge-reranker-v2-m3', device=device)
+                print("Re-ranker loaded on CPU.")
+            else:
+                raise e
 
     def classify_intent(self, query):
         prompt = f"""
