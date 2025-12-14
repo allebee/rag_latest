@@ -1,7 +1,7 @@
 streamlit
 chromadb
 openai
-sentence-transformers
+
 python-docx
 pymupdf
 python-dotenv

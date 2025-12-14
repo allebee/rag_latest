@@ -4,7 +4,7 @@ from openai import OpenAI
 from src.database import get_db
 from src.config import GROK_API_KEY, GROK_MODEL
 
-from sentence_transformers import CrossEncoder
+
 
 from src.utils import get_compute_device
 
@@ -15,7 +15,6 @@ client = OpenAI(
 )
 
 CATEGORIES = [
-    "Общий",
     "Передача",
     "Дарение",
     "Списание",
@@ -36,31 +35,20 @@ class Agent:
         self.npa_collection = self.db.get_or_create_collection("npa_collection")
         self.instr_collection = self.db.get_or_create_collection("instructions_collection")
         # Initialize Re-ranker
-        print("Loading Re-ranker model...")
-        device = get_compute_device()
-        print(f"Re-ranker initialized on: {device.upper()}")
-        
-        try:
-            self.reranker = CrossEncoder('BAAI/bge-reranker-v2-m3', device=device)
-            print("Re-ranker loaded.")
-        except Exception as e:
-            if device == "cuda":
-                print(f"Failed to load Re-ranker on CUDA: {e}")
-                print("Retrying with CPU...")
-                device = "cpu"
-                self.reranker = CrossEncoder('BAAI/bge-reranker-v2-m3', device=device)
-                print("Re-ranker loaded on CPU.")
-            else:
-                raise e
+        # Re-ranker disabled for performance
+        # self.reranker = None
 
     def classify_intent(self, query):
         prompt = f"""
-        Определи категорию запроса пользователя из следующего списка:
+        Определи наиболее подходящую категорию запроса пользователя из следующего списка:
         {CATEGORIES}
         
         Запрос: {query}
         
-        Верни только название категории. Если не уверен, верни "Общий".
+        Инструкция:
+        1. Выбери ОДНУ категорию, которая лучше всего описывает тематику запроса.
+        2. Даже если запрос общий, попытайся отнести его к одной из конкретных тем.
+        3. Верни ТОЛЬКО название категории.
         """
         
         try:
@@ -74,65 +62,13 @@ class Agent:
             for cat in CATEGORIES:
                 if cat in category:
                     return cat
-            return "Общий"
+            # Fallback if no match found - pick the first one or most broad? 
+            # User wants "one more specific category". Let's default to "Передача" or "Приватизация" as they are common? 
+            # Or better, just return one of them.
+            return "Передача" # Default fallback
         except Exception as e:
             print(f"Classification error: {e}")
-            return "Общий"
-
-    def retrieve(self, query, category):
-        # 1. Broad Retrieval (Get more candidates)
-        initial_k = 20 # Retrieve top 20 candidates per source
-        candidates = []
-        
-        # Search Specific Category
-        if category != "Общий":
-            res_cat = self.npa_collection.query(
-                query_texts=[query],
-                n_results=initial_k,
-                where={"category": category}
-            )
-            candidates.extend(self._format_results(res_cat))
-            
-            res_instr = self.instr_collection.query(
-                query_texts=[query],
-                n_results=initial_k,
-                where={"category": category}
-            )
-            candidates.extend(self._format_results(res_instr))
-            
-        # Search General
-        res_gen = self.npa_collection.query(
-            query_texts=[query],
-            n_results=initial_k,
-            where={"category": "Общий"}
-        )
-        candidates.extend(self._format_results(res_gen))
-        
-        # Deduplicate candidates based on content
-        unique_candidates = {c['content']: c for c in candidates}.values()
-        candidates = list(unique_candidates)
-
-        if not candidates:
-            return []
-
-        # 2. Re-ranking
-        # Create pairs: [ [query, doc1], [query, doc2], ... ]
-        pairs = [[query, doc['content']] for doc in candidates]
-        
-        scores = self.reranker.predict(pairs)
-        
-        # Combine docs with scores
-        scored_docs = []
-        for doc, score in zip(candidates, scores):
-            doc['score'] = score
-            scored_docs.append(doc)
-            
-        # Sort by score descending
-        scored_docs.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Return Top K
-        top_k = 5
-        return scored_docs[:top_k]
+            return "Передача"
 
     def _format_results(self, chromadb_results):
         formatted = []
@@ -149,21 +85,59 @@ class Agent:
             })
         return formatted
 
-    def generate_response(self, query, context_items):
+    def generate_response(self, query, context_items, stream=False):
         if not context_items:
+            if stream:
+                yield "К сожалению, я не нашел информации по вашему запросу в базе знаний."
+                return
             return "К сожалению, я не нашел информации по вашему запросу в базе знаний."
             
-        context_str = "\n\n".join([f"Источник: {item['metadata'].get('source')} (Контекст: {item['metadata'].get('full_context', '')})\nТекст: {item['content']}" for item in context_items])
+        context_parts = []
+        for item in context_items:
+            source = item['metadata'].get('source', 'Unknown')
+            # Hierarchical context from ingestion (e.g., "Law > Chapter 2 > Article 5")
+            hierarchy = item['metadata'].get('full_context', 'No context path')
+            content = item['content']
+            
+            # Format: [Source: file.docx | Path: Chapter > Article]
+            # Content: ...
+            part = f"[[Источник: {source} | Структура: {hierarchy}]]\\nТекст: {content}"
+            context_parts.append(part)
+            
+        context_str = "\\n\\n".join(context_parts)
         
         user_message = f"""
-        Вопрос пользователя: {query}
-        
-        Используй следующую информацию для ответа:
-        {context_str}
-        
-        Составь подробный пошаговый план действий если это применимо.
-        Обязательно указывай ссылки на статьи и пункты НПА.
-        """
+Ты аналитик по нормативно-правовым актам (НПА).
+Твоя задача — ответить на вопрос, опираясь ИСКЛЮЧИТЕЛЬНО на предоставленный ниже контекст.
+
+Вопрос: {query}
+
+КОНТЕКСТ:
+{context_str}
+
+ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ ОТВЕТА (СТРОГО):
+
+1. **Структура ответа:**
+   - **Заголовок:** Краткая суть ответа.
+   - **Основная часть:** Четкое разъяснение одним маркированным списком.
+   - **Исключения/Важно:** (Опционально) Если есть критические условия.
+
+2. **Правила цитирования (ВАЖНО):**
+   - НЕ делай отдельный раздел "Обоснование" или "Источники".
+   - Указывай ссылку на пункт/статью СРАЗУ в конце предложения в скобках.
+   - Пример: "...передается по постановлению акимата (п. 10 Правил)." или "...в срок до 30 дней (ст. 15 Закона)."
+   - НЕ пиши "Согласно тексту..." в начале. Пиши суть, а источник в скобки.
+
+3. **Стиль:**
+   - Официально-деловой, нейтральный.
+   - Без вступлений и заключений.
+
+3. **Ограничения:**
+   - ЕСЛИ В КОНТЕКСТЕ НЕТ ОТВЕТА: Напиши "В предоставленных нормативных актах информация по данному вопросу отсутствует."
+   - НЕ ДОДУМЫВАЙ: Не используй "общие знания". Только текст из блока КОНТЕКСТ.
+   - НЕ упоминай названия файлов (source), используй только смысловые ссылки на пункты/статьи.
+"""
+
         
         response = client.chat.completions.create(
             model=GROK_MODEL,
@@ -171,17 +145,23 @@ class Agent:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message}
             ],
-            temperature=0.3
+            temperature=0.3,
+            stream=stream
         )
         
-        return response.choices[0].message.content
+        if stream:
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    yield chunk.choices[0].delta.content
+        else:
+            return response.choices[0].message.content
 
     def check_need_clarification(self, query, history):
         # Format history
         history_str = ""
         for msg in history[-5:]: # Last 5 messages
             role = "User" if msg['role'] == 'user' else "Assistant"
-            history_str += f"{role}: {msg['content']}\n"
+            history_str += f"{role}: {msg['content']}\\n"
             
         prompt = f"""
         Ты - умный маршрутизатор диалога для юридического ассистента по Госимуществу РК.
@@ -205,7 +185,6 @@ class Agent:
             "rewritten_query": "Полный поисковый запрос если false, иначе null"
         }}
         
-        
         Примеры:
         - User: "списание" -> needs_clarification: true, "Уточните, какое имущество вы хотите списать?"
         - User: "как его продать?" (History: "речь про автомобиль") -> needs_clarification: false, rewritten_query: "как продать служебный автомобиль государственного учреждения"
@@ -228,7 +207,110 @@ class Agent:
             # Fallback to assuming it's a clear query
             return {"needs_clarification": False, "rewritten_query": query}
 
-    def run(self, query, history=[]):
+    def generate_hyde_doc(self, query):
+        prompt = f"""
+        Ты - эксперт по госимуществу РК.
+        Напиши ГИПОТЕТИЧЕСКИЙ (вымышленный), но юридически правдоподобный ответ на вопрос:
+        "{query}"
+        
+        Не пытайся ответить точно, просто используй правильную терминологию, названия процедур и структуру, которую ты ожидаешь увидеть в реальном документе.
+        Ответ должен быть на русском языке.
+        """
+        try:
+            response = client.chat.completions.create(
+                model=GROK_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7 
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"HyDE error: {e}")
+            return query
+
+    def self_correct(self, query, response, context_items):
+        context_str = "\\n".join([item['content'] for item in context_items])
+        
+        prompt = f"""
+        Ты - строгий критик (Auditor). Твоя задача проверить ответ ассистента на соответствие контексту.
+        
+        Вопрос: {query}
+        
+        Контекст:
+        {context_str[:15000]}
+        
+        Ответ ассистента:
+        {response}
+        
+        Задание:
+        1. Проверь, не содержит ли ответ галлюцинаций (фактов, которых нет в контексте).
+        2. Если ответ верный и подтверждается контекстом -> верни только слово "OK" (без кавычек и пояснений).
+        3. Если есть ошибки или выдумки -> верни ИСПРАВЛЕННУЮ версию ответа. НЕ ПИШИ "Анализ" или "Исправленная версия". Просто верни готовый текст ответа так, как он должен выглядеть для пользователя.
+        """
+        
+        try:
+            res = client.chat.completions.create(
+                model=GROK_MODEL,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1
+            )
+            content = res.choices[0].message.content
+            if "OK" in content[:10]:
+                return response # Return original if OK
+            else:
+                print("Self-Correction Triggered: Rewriting response.")
+                return content # Return corrected version
+        except Exception as e:
+            print(f"Self-correction error: {e}")
+            return response
+
+    def retrieve(self, query, category, use_hyde=False):
+        search_text = query
+        if use_hyde:
+            print("Generating HyDE document...")
+            hyde_doc = self.generate_hyde_doc(query)
+            print(f"HyDE Doc: {hyde_doc[:100]}...")
+            search_text = hyde_doc
+
+        # 1. Broad Retrieval (Get more candidates)
+        initial_k = 20
+        candidates = []
+        
+        # Search Specific Category
+        if category != "Общий":
+            res_cat = self.npa_collection.query(
+                query_texts=[search_text],
+                n_results=initial_k,
+                where={"category": category}
+            )
+            candidates.extend(self._format_results(res_cat))
+            
+            res_instr = self.instr_collection.query(
+                query_texts=[search_text],
+                n_results=initial_k,
+                where={"category": category}
+            )
+            candidates.extend(self._format_results(res_instr))
+            
+        # Search General
+        res_gen = self.npa_collection.query(
+            query_texts=[search_text],
+            n_results=initial_k,
+            where={"category": "Общий"}
+        )
+        candidates.extend(self._format_results(res_gen))
+        
+        # Deduplicate candidates
+        unique_candidates = {c['content']: c for c in candidates}.values()
+        candidates = list(unique_candidates)
+
+        if not candidates:
+            return []
+
+        # 2. Re-ranking
+        # Return Top K without re-ranking
+        return candidates[:5]
+
+    def run(self, query, history=[], use_hyde=False, use_self_correction=True, stream=False):
         # 1. Router Check
         router_result = self.check_need_clarification(query, history)
         
@@ -246,11 +328,46 @@ class Agent:
         category = self.classify_intent(search_query)
         print(f"Classified as: {category}")
         
-        context = self.retrieve(search_query, category)
-        response = self.generate_response(search_query, context)
+        # 2. Retrieval (with optional HyDE)
+        context = self.retrieve(search_query, category, use_hyde=use_hyde)
         
-        return {
-            "response": response,
-            "category": category,
-            "context": context
-        }
+        # 3. Generation & Self-Correction Logic
+        # If Self-Correction is ON, we cannot stream the initial generation to the user,
+        # because we need to validate it first.
+        if use_self_correction and context:
+            print("Self-Correction Enabled: Buffering initial response...")
+            # Generate FULL response (no stream)
+            initial_response_gen = self.generate_response(search_query, context, stream=True)
+            initial_response = "".join([chunk for chunk in initial_response_gen])
+            
+            print("Running Self-Correction...")
+            final_response = self.self_correct(search_query, initial_response, context)
+            
+            # If the user wants a stream, we fake-stream the final corrected response
+            if stream:
+                def fake_stream(text):
+                    # Yield words or small chunks
+                    words = text.split(' ')
+                    for word in words:
+                        yield word + " "
+                
+                return {
+                    "response": fake_stream(final_response),
+                    "category": category,
+                    "context": context
+                }
+            else:
+                return {
+                    "response": final_response,
+                    "category": category,
+                    "context": context
+                }
+        else:
+            # Normal streaming (or not)
+            response = self.generate_response(search_query, context, stream=stream)
+            
+            return {
+                "response": response,
+                "category": category,
+                "context": context
+            }
