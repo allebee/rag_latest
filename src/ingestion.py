@@ -33,14 +33,18 @@ class DocxParser:
         # Buffer for merging small paragraphs
         current_chunk_text = []
         current_chunk_size = 0
-        CHUNK_SIZE_LIMIT = 1000  # Target characters per chunk
+        CHUNK_SIZE_LIMIT = 2000  # Target characters per chunk
         
         def commit_chunk(text_list, metadata):
              if not text_list:
                  return
              full_text = "\n".join(text_list)
+             # Inject context into the text for better embeddings
+             context_header = f"Контекст: {metadata.get('full_context', '')}\n"
+             final_text = context_header + full_text
+             
              chunks.append({
-                "text": full_text,
+                "text": final_text,
                 "metadata": metadata.copy()
              })
         

@@ -1,5 +1,6 @@
 import json
 import time
+import os
 from openai import OpenAI
 from src.agent import Agent
 from src.config import GROK_API_KEY, GROK_MODEL
@@ -40,10 +41,21 @@ def evaluate_response(question, agent_answer, ground_truth):
         return {"score": 0, "explanation": "Error"}
 
 def main():
-    print("Loading dataset...")
-    with open("eval_dataset.json", "r", encoding="utf-8") as f:
-        dataset = json.load(f)
-        
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--dataset", default="eval_dataset.json", help="Path to evaluation dataset JSON")
+    args = parser.parse_args()
+
+    dataset_path = args.dataset
+    print(f"Loading dataset from {dataset_path}...")
+    
+    try:
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            dataset = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: Dataset {dataset_path} not found.")
+        return
+
     agent = Agent()
     results = []
     
@@ -55,7 +67,7 @@ def main():
     for item in dataset:
         q = item["question"]
         gt = item["ground_truth"]
-        source_meta = item["source_metadata"]
+        source_meta = item.get("source_metadata", {}) # Handle missing metadata safely
         
         print(f"\nProcessing: {q}")
         start_time = time.time()
@@ -70,10 +82,19 @@ def main():
         # Ideally we check if the exact chunk was retrieved, but checking source file is a good proxy for category/file retrieval
         hit = False
         target_source = source_meta.get("source")
-        for ctx in retrieved_context:
-            if ctx['metadata'].get('source') == target_source:
-                hit = True
-                break
+        
+        # If we don't have a target source defined, we can't measure retrieval hit 
+        # (or we consider it a hit if we don't require specific retrieval? No, better to skip or fail)
+        if target_source:
+             for ctx in retrieved_context:
+                # Flexible check: contains or exact match
+                if ctx['metadata'].get('source') and target_source in ctx['metadata'].get('source'):
+                    hit = True
+                    break
+        else:
+            # If no source target known, maybe we just assume False or ignore?
+            # For now let's assume False
+            pass
         
         if hit:
             retrieval_hits += 1
@@ -90,7 +111,8 @@ def main():
             "retrieval_hit": hit,
             "correctness_score": score,
             "explanation": eval_res["explanation"],
-            "latency": duration
+            "latency": duration,
+            "target_source": target_source
         })
         print(f"Score: {score}/5 | Hit: {hit}")
 
@@ -99,7 +121,8 @@ def main():
     hit_rate = retrieval_hits / len(dataset) if dataset else 0
     
     report = f"""# RAG Evaluation Report
-
+    
+**Dataset:** {dataset_path}
 **Total Samples:** {len(dataset)}
 **Average Correctness Score (1-5):** {avg_score:.2f}
 **Retrieval Hit Rate:** {hit_rate:.2%}\n\n"""
@@ -107,15 +130,17 @@ def main():
     for r in results:
         report += f"## Q: {r['question']}\n"
         report += f"- **Score:** {r['correctness_score']}/5\n"
-        report += f"- **Retrieval Hit:** {r['retrieval_hit']}\n"
+        report += f"- **Retrieval Hit:** {r['retrieval_hit']} (Target: {r.get('target_source')})\n"
         report += f"- **Explanation:** {r['explanation']}\n"
         report += f"- **Latency:** {r['latency']:.2f}s\n"
         report += "---\n"
         
-    with open("evaluation_report.md", "w", encoding="utf-8") as f:
+    report_filename = f"evaluation_report_{os.path.basename(dataset_path).replace('.json', '')}.md"
+    with open(report_filename, "w", encoding="utf-8") as f:
         f.write(report)
         
     print(f"\nEvaluation Complete. Avg Score: {avg_score:.2f}, Hit Rate: {hit_rate:.2%}")
+    print(f"Report saved to {report_filename}")
 
 if __name__ == "__main__":
     main()
