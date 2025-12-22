@@ -1,0 +1,59 @@
+# RAG System Evaluation and Improvement Walkthrough
+
+## Goal
+Evaluate and refine the RAG system's chunking strategy and retrieval performance, specifically addressing context loss in tables and persistent failures for certain questions.
+
+## Key Changes
+### 1. Improved Chunking Strategy
+- **Problem:** Tables were being processed separately from paragraphs, leading to loss of hierarchical context (headers, chapters) for table data.
+- **Fix:** Refactored [src/ingestion.py](file:///Users/user/Desktop/CSI%20Codebase/rag_latest/src/ingestion.py) to use a **linear processing approach** (`iterchildren()`). Now, tables are chunked in their exact document order, inheriting context from preceding headers.
+
+### 2. Retrieval Logic Enhancements ([src/agent.py](file:///Users/user/Desktop/CSI%20Codebase/rag_latest/src/agent.py))
+- **Global Search Fallback:** Implemented a hybrid search strategy. The system now searches the specific **Category** (e.g., "Списание") AND performs a **Global Search** (all documents).
+    - **Why:** To catch miscategorized documents (e.g., "Bio Assets" info was in `Передача` folder but query was `Списание`).
+- **Candidate Sorting:** Fixed a critical bug where merged results were not sorted by similarity score. Now, all candidates (Category + Global) are sorted by distance before slicing, ensuring the most relevant global results bubble up to top K.
+- **Increased Candidates:** Increased `initial_k` to 150 to improve recall for hard-to-find chunks.
+
+### 3. Router Tuning ([src/agent.py](file:///Users/user/Desktop/CSI%20Codebase/rag_latest/src/agent.py))
+- **Problem:** Valid questions like "Are there base rates?" were being rejected as "Clarification Needed".
+- **Fix:** Relaxed the Router prompt to explicitly treat "existence" questions as valid search queries.
+
+## Evaluation Results
+
+| ID | Question | Issue | Status | Fix Verified |
+|----|----------|-------|--------|--------------|
+| **7** | "Exist base rates?" | Router blocked | **Pass** | Router allows query; retrieves "Chapter 5" on rates. |
+| **8** | "Bio Assets Proc?" | Wrong Category | **Pass** | Global Search identifies `20251219 - Алгоритм...` correctly. |
+| **0** | "Lease Extension" | Context match | **Pass** | Retrieves relevant lease extension rules (Ch. 2). |
+
+### Verification
+Ran [test_rag_flow.py](file:///Users/user/Desktop/CSI%20Codebase/rag_latest/test_rag_flow.py) (simulating `agent.run`):
+- **Retrieval:** Successfully found documents across categories.
+- **Answer Generation:** Agent generated accurate, citation-backed answers for previously failing queries.
+- **Context:** Table chunks now appear in correct context.
+
+### Phase 2: Conversation Refinement & Guardrails
+- **Router Intelligence:** Implemented "Sufficiency Criteria" (based on Miro diagram).
+    - **Outcome:** The bot now effectively distinguishes between ambiguous queries (e.g., "Write off property") and specific ones ("Write off car"), asking for clarification only when necessary (Type, Level, etc.).
+- **Guardrails:** Added strict negative constraints.
+    - **Outcome:** Mentions of "National Bank" and "Military" are successfully suppressed in general answers (e.g., Transfer procedures).
+- **Formatting:** Enforced structured output.
+    - **Outcome:** Answers now explicitly list "Formalities", "Required Documents", and "Submission Destination".
+
+## Evaluation Results
+
+| ID | Test Case | Outcome | Status |
+|---|---|---|---|
+| **P2-1** | "Ambiguous Write-off" | Router asks for Property Type | **Pass** |
+| **P2-2** | "Specific Write-off" | Router search (No extra questions) | **Pass** |
+| **P2-3** | "Transfer Guardrail" | Answer excludes "National Bank" | **Pass** |
+| **P2-4** | "Formatting" | Answer lists Docs & Formalities | **Pass** |
+
+### Verification
+Ran [verify_phase2.py](file:///Users/user/Desktop/CSI%20Codebase/rag_latest/verify_phase2.py):
+- Validated Router logic for all 3 major categories (Transfer, Write-off, Lease).
+- Confirmed "No National Bank" in generated text.
+- Confirmed presence of document lists in output.
+
+## Conclusion
+The RAG system is now more robust against category mismatches and stricter routing. The chunking strategy preserves document structure, and the fallback search ensures high recall. Phase 2 improvements have significantly enhanced conversational quality and compliance with business rules.

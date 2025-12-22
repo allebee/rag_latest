@@ -25,8 +25,18 @@ CATEGORIES = [
 
 SYSTEM_PROMPT = """Ты - эксперт-консультант по управлению государственным имуществом Республики Казахстан.
 Твоя задача - давать точные, пошаговые инструкции на основе предоставленного контекста из НПА (Нормативно-правовых актов).
-Не выдумывай информацию. Если в контексте нет ответа, так и скажи.
-Всегда ссылайся на источники (Глава, Статья) из контекста.
+
+ДИРЕКТИВЫ ПО ФОРМАТУ ОТВЕТА:
+1. Описывай процедуры подробно.
+2. ВСЕГДА указывай:
+   - Какие формальности требуется соблюсти.
+   - Какие документы оформить (списком).
+   - Куда подавать документы (веб-портал, орган и т.д.).
+
+ОГРАНИЧЕНИЯ (GUARDRAILS):
+1. Не выдумывай информацию. Если нет в контексте, так и скажи.
+2. Всегда ссылайся на источники (Глава, Статья) в скобках.
+3. ИЗБЕГАЙ упоминания "Национального Банка" и "Военного имущества/Военного времени", если пользователь ПРЯМО не спросил об этом. Это специфические исключения, которые путают пользователей. Оперируй общими правилами для госимущества.
 """
 
 class Agent:
@@ -77,11 +87,18 @@ class Agent:
             
         docs = chromadb_results['documents'][0]
         metas = chromadb_results['metadatas'][0]
+        # Distances are optional, handle if missing
+        dists = chromadb_results.get('distances', [None]*len(docs))
+        if dists:
+            dists = dists[0]
+        else:
+            dists = [1.0] * len(docs) # Default high distance
         
-        for doc, meta in zip(docs, metas):
+        for doc, meta, dist in zip(docs, metas, dists):
             formatted.append({
                 "content": doc,
-                "metadata": meta
+                "metadata": meta,
+                "distance": dist
             })
         return formatted
 
@@ -120,7 +137,6 @@ class Agent:
 1. **Структура ответа:**
    - **Заголовок:** Краткая суть ответа.
    - **Основная часть:** Четкое разъяснение одним маркированным списком.
-   - **Исключения/Важно:** (Опционально) Если есть критические условия.
 
 2. **Правила цитирования (ВАЖНО):**
    - НЕ делай отдельный раздел "Обоснование" или "Источники".
@@ -170,8 +186,15 @@ class Agent:
         
         Твоя задача:
         1. Проанализировать последний запрос пользователя с учетом истории диалога.
-        2. Если запрос СЛИШКОМ размытый (например просто "автомобиль" или "как продать?"), и контекст непонятен -> Сформулируй уточняющий вопрос.
-        3. Если запрос понятен (или стал понятен из контекста) -> Переформулируй его в полной, самодостаточной форме для поиска.
+        2. Проверить КРИТЕРИИ ДОСТАТОЧНОСТИ информации (Miro Rules):
+           - Если тема "ПЕРЕДАЧА": Нужно знать уровни отправителя и получателя (Республиканский, Областной, Районный, Сельский). Минимум одна сторона должна быть коммунальной. Если непонятно кто кому передает -> needs_clarification: true.
+           - Если тема "СПИСАНИЕ" или "ВЫБЫТИЕ": Нужно знать ТИП имущества (Недвижимость, Биологические активы, или Основные средства/Машины). Если просто "как списать имущество?" -> needs_clarification: true.
+           - Если тема "АРЕНДА": Нужно знать ТИП (Общий случай, Неиспользуемое госимущество, или Водохозяйственные сооружения).
+        
+        3. Если критерии НЕ соблюдены -> Сформулируй уточняющий вопрос (clarification_question).
+        4. Если критерии соблюдены ИЛИ вопрос общий (о наличии ставок, правил) -> needs_clarification: false.
+        5. Если пользователь спрашивает о НАЛИЧИИ правил, ставок, процедур (например "есть ли ставки?", "как списать?"), НЕ нужно уточнять детали. Считай это поисковым запросом.
+        6. Создай self-contained поисковый запрос (rewritten_query).
         
         История диалога:
         {history_str}
@@ -272,7 +295,7 @@ class Agent:
             search_text = hyde_doc
 
         # 1. Broad Retrieval (Get more candidates)
-        initial_k = 20
+        initial_k = 150
         candidates = []
         
         # Search Specific Category
@@ -291,17 +314,31 @@ class Agent:
             )
             candidates.extend(self._format_results(res_instr))
             
-        # Search General
-        res_gen = self.npa_collection.query(
+        # Search Global Fallback (catch-all for misclassified docs or cross-category info)
+        # This is critical because some docs might be in specific folders but relevant to other queries.
+        res_global = self.npa_collection.query(
             query_texts=[search_text],
             n_results=initial_k,
-            where={"category": "Общий"}
+            # No 'where' clause -> search everything
         )
-        candidates.extend(self._format_results(res_gen))
+        candidates.extend(self._format_results(res_global))
         
         # Deduplicate candidates
-        unique_candidates = {c['content']: c for c in candidates}.values()
-        candidates = list(unique_candidates)
+        # Deduplicate candidates (preserve best distance)
+        unique_candidates = {}
+        for c in candidates:
+            # If doc already exists, keep the one with lower distance (if available)
+            if c['content'] not in unique_candidates:
+                unique_candidates[c['content']] = c
+            else:
+                if c['distance'] and unique_candidates[c['content']]['distance']:
+                    if c['distance'] < unique_candidates[c['content']]['distance']:
+                         unique_candidates[c['content']] = c
+        
+        candidates = list(unique_candidates.values())
+        
+        # SORT by distance (Ascending: Lower is better for L2/Euclidean)
+        candidates.sort(key=lambda x: x.get('distance', 1.0) or 1.0)
 
         if not candidates:
             return []
